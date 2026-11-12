@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overcomplete-ica"
+version = "0.1.0"
+description = "Overcomplete ICA by the variational EM algorithm of Girolami (2001)."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    # validate_data is available from scikit-learn 1.6
+    "scikit-learn>=1.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/cdt15/overcomplete-ica"
+
+[tool.setuptools]
+packages = ["ocica"]
