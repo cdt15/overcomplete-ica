@@ -64,7 +64,7 @@ print(source_snr(S, S_aligned))            # SNR per source (dB)
 | --- | --- | --- |
 | `n_components` | `None` | Number of sources `L`. If `None`, the number of features is used (complete ICA). |
 | `n_init` | `1` | Number of random initializations; the run with the highest lower bound is kept. |
-| `max_iter` | `500` | Maximum number of EM iterations per initialization. |
+| `max_iter` | `10` | Maximum number of EM iterations per initialization. |
 | `tol` | `1e-6` | Convergence threshold on the per-sample lower bound. |
 | `n_xi_updates` | `1` | Number of E-steps per EM iteration. |
 | `w_init` | `None` | Initial mixing matrix of shape `(n_features, n_components)`. |

@@ -131,7 +131,7 @@ def test_stays_near_truth_from_true_initialization():
 def test_complete_case():
     """With n_components=None the model is complete ICA."""
     X, _, A = make_overcomplete_data(2000, 2, 2, noise_std=0.05, min_angle=30, random_state=1)
-    m = OvercompleteICA(n_init=3, random_state=0).fit(X)
+    m = OvercompleteICA(n_init=3, max_iter=500, random_state=0).fit(X)
     assert m.mixing_.shape == (2, 2)
     assert mixing_angle_error(A, m.mixing_).max() < 5.0
 
@@ -158,7 +158,7 @@ def test_api_shapes_and_attributes():
 
 def test_fit_transform_consistent_with_transform():
     X, _, _ = make_overcomplete_data(500, 2, 3, random_state=0)
-    m = OvercompleteICA(3, random_state=0)
+    m = OvercompleteICA(3, max_iter=500, random_state=0)
     np.testing.assert_allclose(m.fit_transform(X), m.transform(X), atol=0.05)
 
 

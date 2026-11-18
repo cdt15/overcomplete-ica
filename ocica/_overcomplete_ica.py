@@ -17,6 +17,8 @@ _C = np.sqrt(2.0)
 _LOG_2PI = np.log(2.0 * np.pi)
 # Lower bound of the variational parameters (prior variances). At 0 the posterior variance collapses and becomes numerically unstable.
 _V_FLOOR = 1e-12
+# Floor of V in the denominator of the relative change used for the inference stopping criterion
+_V_CHANGE_FLOOR = 1e-8
 # Lower bound of the noise variance (relative to the mean data variance), for numerical stability.
 _MIN_NOISE_VAR = 1e-6
 # Ratio of the initial noise covariance to the data covariance
@@ -119,24 +121,6 @@ def _m_step(X, XtX, mean, post_cov):
     return A, 0.5 * (resid_cov + resid_cov.T)
 
 
-def _floor_eigenvalues(S, min_var):
-    """Clip the eigenvalues of a symmetric matrix from below.
-
-    Parameters
-    ----------
-    S : ndarray of shape (n_features, n_features)
-        Symmetric matrix.
-    min_var : float
-        Lower bound on the eigenvalues.
-
-    Returns
-    -------
-    S_floored : ndarray of shape (n_features, n_features)
-    """
-    w, U = linalg.eigh(S)
-    return (U * np.maximum(w, min_var)) @ U.T
-
-
 def _random_mixing(cov, n_components, random_state):
     """Draw a random mixing matrix consistent with the data covariance.
 
@@ -182,7 +166,7 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
     n_init : int, default=1
         Number of random initializations. The run with the highest
         variational lower bound is kept.
-    max_iter : int, default=500
+    max_iter : int, default=10
         Maximum number of EM iterations per initialization.
     tol : float, default=1e-6
         Convergence threshold on the increase of the per-sample lower bound.
@@ -251,7 +235,7 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         n_components=None,
         *,
         n_init=1,
-        max_iter=500,
+        max_iter=10,
         tol=1e-6,
         n_xi_updates=1,
         w_init=None,
@@ -271,7 +255,6 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         self.random_state = random_state
         self.verbose = verbose
 
-    # ------------------------------------------------------------------     Validation
     _positive_int_params = ("max_iter", "n_init", "n_xi_updates", "transform_max_iter")
     _non_negative_params = ("tol", "transform_tol")
 
@@ -295,8 +278,9 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
             if not isinstance(val, numbers.Integral) or val < 1:
                 raise ValueError(f"{name} must be an integer >= 1, got {val!r}")
         for name in self._non_negative_params:
-            if getattr(self, name) < 0:
-                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)!r}")
+            val = getattr(self, name)
+            if val < 0:
+                raise ValueError(f"{name} must be non-negative, got {val!r}")
         return n_components
 
     def _check_w_init(self, n_features, n_components):
@@ -322,8 +306,7 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
             )
         return w_init
 
-    # ------------------------------------------------------------------     Training
-    def _initialize(self, X, n_components, rng):
+    def _initialize(self, X, n_components, w_init, rng):
         """Initialize the mixing matrix, noise covariance and variational parameters.
 
         A is random (or ``w_init``), Sigma is a fraction of the data covariance and
@@ -336,6 +319,8 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
             Centered data.
         n_components : int
             Number of sources.
+        w_init : ndarray of shape (n_features, n_components) or None
+            Validated initial mixing matrix.
         rng : RandomState
             Random number generator.
 
@@ -346,29 +331,10 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         V : ndarray of shape (n_samples, n_components)
         """
         cov = X.T @ X / X.shape[0]
-        w_init = self._check_w_init(X.shape[1], n_components)
         A = w_init if w_init is not None else _random_mixing(cov, n_components, rng)
         noise_cov = _INIT_NOISE_RATIO * cov
         V = np.maximum(np.abs(rng.standard_normal((X.shape[0], n_components))), _V_FLOOR)
         return A, noise_cov, V
-
-    def _update_noise(self, resid_cov, noise_cov, min_var):
-        """Return the noise covariance after the M-step (full covariance, Eq. 3.8).
-
-        Parameters
-        ----------
-        resid_cov : ndarray of shape (n_features, n_features)
-            Unconstrained M-step estimate.
-        noise_cov : ndarray of shape (n_features, n_features)
-            Current noise covariance (unused here).
-        min_var : float
-            Lower bound on the eigenvalues.
-
-        Returns
-        -------
-        noise_cov : ndarray of shape (n_features, n_features)
-        """
-        return _floor_eigenvalues(resid_cov, min_var)
 
     def _run_em(self, X, A, noise_cov, V, min_var):
         """Run variational EM from the given initial values.
@@ -389,8 +355,8 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         Returns
         -------
         result : dict
-            Keys ``A``, ``noise_cov``, ``mean``, ``post_cov``, ``bounds``,
-            ``n_iter`` and ``converged``.
+            Keys ``A``, ``noise_cov``, ``mean``, ``bounds``, ``n_iter`` and
+            ``converged``.
         """
         XtX = X.T @ X
         bounds = []
@@ -407,7 +373,9 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
 
             # M-step (Eqs. 3.7, 3.8, 3.9 of the paper)
             A, resid_cov = _m_step(X, XtX, mean, post_cov)
-            noise_cov = self._update_noise(resid_cov, noise_cov, min_var)
+            # Full noise covariance (Eq. 3.8), with eigenvalues floored at min_var
+            w, U = linalg.eigh(resid_cov)
+            noise_cov = (U * np.maximum(w, min_var)) @ U.T
             V = _update_v(mean, post_cov)
 
             if self.verbose > 1:
@@ -416,29 +384,10 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
                 converged = True
                 break
 
-        mean, post_cov, bound = _e_step(X, A, noise_cov, V)
+        mean, _, bound = _e_step(X, A, noise_cov, V)
         bounds.append(bound.mean())
-        return dict(A=A, noise_cov=noise_cov, mean=mean, post_cov=post_cov,
+        return dict(A=A, noise_cov=noise_cov, mean=mean,
                     bounds=np.asarray(bounds), n_iter=n_iter, converged=converged)
-
-    def _score_run(self, X, result, rng):
-        """Return the criterion used to select among initializations.
-
-        Parameters
-        ----------
-        X : ndarray of shape (n_samples, n_features)
-            Centered data.
-        result : dict
-            Output of :meth:`_run_em`.
-        rng : RandomState
-            Random number generator.
-
-        Returns
-        -------
-        score : float
-            Final per-sample lower bound.
-        """
-        return result["bounds"][-1]
 
     def _fit(self, X):
         """Fit the model and return the posterior means of the training data.
@@ -455,26 +404,25 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         X = validate_data(self, X, dtype=[np.float64, np.float32], ensure_min_samples=2)
         X = np.asarray(X, dtype=np.float64)
         n_components = self._check_params(X.shape[1])
+        w_init = self._check_w_init(X.shape[1], n_components)
 
         self.mean_ = X.mean(axis=0)
         Xc = X - self.mean_
         min_var = _MIN_NOISE_VAR * max(Xc.var(axis=0).mean(), np.finfo(float).tiny)
 
         rng = check_random_state(self.random_state)
-        best, best_score = None, -np.inf
-        init_bounds, init_scores = [], []
+        best, best_bound = None, -np.inf
+        init_bounds = []
         for i in range(self.n_init):
-            A, noise_cov, V = self._initialize(Xc, n_components, rng)
+            A, noise_cov, V = self._initialize(Xc, n_components, w_init, rng)
             res = self._run_em(Xc, A, noise_cov, V, min_var)
-            score = self._score_run(Xc, res, rng)
-            init_bounds.append(res["bounds"][-1])
-            init_scores.append(score)
+            bound = res["bounds"][-1]
+            init_bounds.append(bound)
             if self.verbose:
-                print(f"init {i + 1}/{self.n_init}: lower bound = {res['bounds'][-1]:.6f}, "
-                      f"score = {score:.6f}, n_iter = {res['n_iter']}, "
-                      f"converged = {res['converged']}")
-            if best is None or score > best_score:
-                best, best_score = res, score
+                print(f"init {i + 1}/{self.n_init}: lower bound = {bound:.6f}, "
+                      f"n_iter = {res['n_iter']}, converged = {res['converged']}")
+            if best is None or bound > best_bound:
+                best, best_bound = res, bound
                 self.best_init_ = i
 
         self.mixing_ = best["A"]
@@ -485,7 +433,6 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         self.lower_bounds_ = best["bounds"]
         self.lower_bound_ = float(best["bounds"][-1])
         self.init_lower_bounds_ = np.asarray(init_bounds)
-        self._init_scores = np.asarray(init_scores)
         self._n_features_out = n_components
         return best["mean"]
 
@@ -524,7 +471,6 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         """
         return self._fit(X)
 
-    # ------------------------------------------------------------    ------ Inference
     def _infer(self, X):
         """Iterate the variational parameters with A and Sigma fixed.
 
@@ -537,8 +483,6 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         -------
         mean : ndarray of shape (n_samples, n_components)
             Posterior means.
-        post_cov : ndarray of shape (n_samples, n_components, n_components)
-            Posterior covariances.
         bound : ndarray of shape (n_samples,)
             Lower bound on log p(x_n).
         """
@@ -549,11 +493,12 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
             mean, post_cov, _ = _e_step(Xc, self.mixing_, self.noise_covariance_, V,
                                         compute_bound=False)
             V_new = _update_v(mean, post_cov)
-            change = np.max(np.abs(V_new - V) / np.maximum(V, 1e-8))
+            change = np.max(np.abs(V_new - V) / np.maximum(V, _V_CHANGE_FLOOR))
             V = V_new
             if change < self.transform_tol:
                 break
-        return _e_step(Xc, self.mixing_, self.noise_covariance_, V)
+        mean, _, bound = _e_step(Xc, self.mixing_, self.noise_covariance_, V)
+        return mean, bound
 
     def transform(self, X, copy=True):
         """Return the posterior means E{s | x} of the sources.
@@ -575,7 +520,7 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         """
         check_is_fitted(self)
         X = validate_data(self, X, dtype=[np.float64, np.float32], reset=False, copy=copy)
-        mean, _, _ = self._infer(np.asarray(X, dtype=np.float64))
+        mean, _ = self._infer(np.asarray(X, dtype=np.float64))
         return mean
 
     def inverse_transform(self, X, copy=True):
@@ -616,7 +561,7 @@ class OvercompleteICA(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEst
         """
         check_is_fitted(self)
         X = validate_data(self, X, dtype=[np.float64, np.float32], reset=False)
-        _, _, bound = self._infer(np.asarray(X, dtype=np.float64))
+        _, bound = self._infer(np.asarray(X, dtype=np.float64))
         return bound
 
     def score(self, X, y=None):
